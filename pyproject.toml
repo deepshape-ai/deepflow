@@ -1,0 +1,55 @@
+[project]
+name = "deepflow"
+version = "0.3.0"
+description = "DeepFlow Runner — declarative three-stage pipeline execution framework"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "click>=8.1.0",
+    "pydantic>=2.0.0",
+    "pyyaml>=6.0.0",
+    "rich>=13.0.0",
+]
+
+[project.optional-dependencies]
+server = [
+    "fastapi>=0.100.0",
+    "uvicorn[standard]>=0.20.0",
+    "websockets>=11.0",
+    "python-multipart>=0.0.6",
+]
+
+[project.scripts]
+deepflow = "deepflow.cli:cli"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/deepflow"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"src/deepflow/server/static" = "deepflow/server/static"
+
+# 构建 wheel 时自动编译 web UI（需要 Node.js >= 18，缺失则跳过）
+[tool.hatch.build.hooks.custom]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+ignore = ["E501", "B008"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["deepflow"]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.15.0",
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    "httpx>=0.27",
+]
