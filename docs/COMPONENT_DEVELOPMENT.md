@@ -267,23 +267,21 @@ class DatabaseIterator(BaseIterator):
 
 ## 共享模块
 
-当多个组件需要复用代码（常量、工具函数、客户端封装），提取到独立目录并在 manifest 中通过 `shared` 声明。框架在加载组件前将这些目录加入 `sys.path`。
+当多个组件需要复用代码（常量、工具函数、客户端封装），放在 manifest 目录内，
+并使用包内相对导入。每个 manifest 使用独立命名空间，并发运行不会串用模块。
 
 ```yaml
-shared:
-  - ./components/_shared    # 路径相对于 manifest.yaml
-
 pipeline:
   casewise:
     - src: ./components/seg_evaluator.py
-    # seg_evaluator.py 内部可以直接: from gt_seg import find_gt_seg
+    # seg_evaluator.py: from ._shared.gt_seg import find_gt_seg
 ```
 
 注意事项：
 
-- shared 目录中的 `.py` 文件作为顶层模块被 import，文件名即模块名
-- 避免与标准库或第三方包重名（如 `json.py`、`utils.py`）
-- shared 模块在 pipeline 启动时统一注册，三个阶段均可使用
+- 本地源码必须位于 manifest 目录内
+- 本地模块之间必须使用相对导入，不使用裸模块名
+- 同一 manifest 内的模块按需加载并复用
 
 典型目录结构：
 

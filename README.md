@@ -150,19 +150,17 @@ pipeline:
 
 ### 共享模块
 
-多个组件复用的代码（工具函数、常量、客户端封装）放到独立目录，通过 `shared` 声明：
+多个组件复用的代码放在 manifest 目录内，并使用包内相对导入：
 
 ```yaml
-shared:
-  - ./components/_shared
-
 pipeline:
   casewise:
     - src: ./components/step_a.py
-    # step_a.py 中可以直接: from stages import SEMANTIC_STAGES
+    # step_a.py: from ._shared.stages import SEMANTIC_STAGES
 ```
 
-框架在加载组件前将 shared 目录加入 `sys.path`。shared 中的 `.py` 文件作为顶层模块被 import，文件名即模块名。
+每个 manifest 使用独立模块命名空间，并发运行不会串用同名本地模块。不支持 `import stages`
+这类裸模块导入。
 
 ### 内置组件
 

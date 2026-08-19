@@ -204,21 +204,16 @@ class DatabaseIterator(BaseIterator):
 多组件复用代码（client、常量、工具）放独立目录，manifest 里声明 `shared`：
 
 ```yaml
-shared:
-  - ./components/_shared    # 路径相对 manifest.yaml
-
 pipeline:
   casewise:
     - src: ./components/quality_check.py
-    # quality_check.py 里：from llm_client import call_llm
+    # quality_check.py 里：from ._shared.llm_client import call_llm
 ```
 
 注意事项：
 
-- shared 目录中的 `.py` **作为顶层模块导入**，文件名即模块名。`_shared/llm_client.py` → `import llm_client`。
-- 避免和标准库 / 第三方包重名（`json.py`、`utils.py`、`config.py` 都是雷区）。
-- shared 在 pipeline 启动时统一注册一次，三个阶段都能用。
-- manifest 所在目录也会被加入 `sys.path`，所以 `./components/` 下的代码也可以彼此 import（用 dotted path：`from components._shared.llm_client import ...`）。
+- 本地源码必须位于 manifest 目录内，并使用包内相对导入。
+- 每个 manifest 使用独立命名空间，并发 run 不共享同名本地模块。
 
 ## 失败时保留 metrics
 

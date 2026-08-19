@@ -53,6 +53,13 @@ class StepConfig(BaseModel):
     retry: RetryConfig = Field(default_factory=RetryConfig, description="重试配置")
 
 
+class HookConfig(BaseModel):
+    """单个 hook 配置"""
+
+    src: str = Field(description="hook 源:namespace:name 或 ./path.py")
+    config: dict[str, Any] = Field(default_factory=dict, description="hook 配置")
+
+
 class PipelineConfig(BaseModel):
     """Pipeline 配置：三个阶段"""
 
@@ -74,6 +81,7 @@ class Manifest(BaseModel):
     concurrency: int = Field(default=1, ge=1, le=100, description="并发数")
     vars: dict[str, Any] = Field(default_factory=dict, description="用户自定义变量，所有组件通过 ctx.vars 访问")
     pipeline: PipelineConfig
+    hooks: list[HookConfig] = Field(default_factory=list, description="生命周期观察 hook")
 
     @model_validator(mode="before")
     @classmethod

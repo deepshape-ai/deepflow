@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 
 import pytest
 from httpx import AsyncClient
@@ -63,6 +64,27 @@ async def test_run_reaches_terminal_state(client: AsyncClient, valid_manifest: d
         pytest.fail("Run did not reach terminal state")
 
     assert s in ("completed", "failed")
+
+
+async def test_invalid_hook_reaches_failed_without_log_handler_leak(
+    client: AsyncClient, valid_manifest: dict
+):
+    invalid = {**valid_manifest, "hooks": [{"src": "./missing.py"}]}
+    before_handlers = tuple(logging.getLogger().handlers)
+    pid = await _create_pipeline(client, invalid)
+    run_resp = await client.post(f"/api/v1/pipelines/{pid}/runs")
+    run_id = run_resp.json()["id"]
+
+    for _ in range(50):
+        response = await client.get(f"/api/v1/runs/{run_id}")
+        if response.json()["status"] == "failed":
+            break
+        await asyncio.sleep(0.1)
+    else:
+        pytest.fail("invalid hook run did not reach failed")
+
+    assert "Hook 文件未找到" in response.json()["error"]
+    assert tuple(logging.getLogger().handlers) == before_handlers
 
 
 async def test_delete_completed_run(client: AsyncClient, valid_manifest: dict):

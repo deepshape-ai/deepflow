@@ -39,6 +39,16 @@ PUT    /api/v1/pipelines/{id}/components/{name}     更新
 DELETE /api/v1/pipelines/{id}/components/{name}     删除
 ```
 
+## Hook 文件管理
+
+```
+POST   /api/v1/pipelines/{id}/hooks                 上传 .py
+GET    /api/v1/pipelines/{id}/hooks                 列出
+GET    /api/v1/pipelines/{id}/hooks/{name}          读取
+PUT    /api/v1/pipelines/{id}/hooks/{name}          更新
+DELETE /api/v1/pipelines/{id}/hooks/{name}          删除
+```
+
 ## Run 管理
 
 ```
@@ -89,6 +99,8 @@ GET    /api/v1/health                               健康检查
 
 注意事件顺序：`step.started` 早于 `case.started`（preprocess / postprocess 阶段没有 `case_*` 事件，只有 `step.*`）。
 
+这些事件由内置 hook `EventEmitterHook`（`deepflow.server.hooks`）产生。要在各生命周期挂点插入自定义观察逻辑（通知、上报、自定义指标），见 `docs/HOOKS.md`。
+
 ## 数据目录
 
 ```
@@ -96,6 +108,7 @@ GET    /api/v1/health                               健康检查
   pipelines/{pipeline_id}/
     pipeline.json                             # manifest 元数据
     components/                               # 上传的 .py 文件
+    hooks/                                    # 上传的 Hook .py 文件
   runs/{run_id}/
     run.json                                  # run 元数据
     run.log                                   # 完整日志

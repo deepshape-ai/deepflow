@@ -2,12 +2,13 @@
 Pipeline 配置存储 — 目录级 CRUD。
 
 遵循 deepflow 的 "文件即接口" 哲学：
-每条 Pipeline 拥有独立目录，包含配置 JSON 和自定义组件文件。
+每条 Pipeline 拥有独立目录，包含配置 JSON、组件与 hook 源码。
 
 目录结构：
     pipelines/{id}/
     ├── pipeline.json        # 配置元数据
-    └── components/          # 自定义组件 .py 文件
+    ├── components/          # 自定义组件 .py 文件
+    └── hooks/               # 自定义 hook .py 文件
 """
 
 from __future__ import annotations
@@ -23,7 +24,7 @@ import yaml
 
 from deepflow.server.models import PipelineResponse
 
-_EXPORT_VERSION = "1.0"
+_EXPORT_VERSION = "2.0"
 
 
 class PipelineStore:
@@ -42,6 +43,7 @@ class PipelineStore:
         pipeline_dir = self._pipeline_dir(pipeline_id)
         pipeline_dir.mkdir(parents=True, exist_ok=True)
         (pipeline_dir / "components").mkdir(exist_ok=True)
+        (pipeline_dir / "hooks").mkdir(exist_ok=True)
 
         data = {
             "id": pipeline_id,
@@ -62,6 +64,8 @@ class PipelineStore:
     def list_all(self) -> list[PipelineResponse]:
         results = []
         for pipeline_dir in sorted(self._dir.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True):
+            if pipeline_dir.name.startswith("."):
+                continue
             json_path = pipeline_dir / "pipeline.json"
             if json_path.exists():
                 data = json.loads(json_path.read_text(encoding="utf-8"))
@@ -102,10 +106,11 @@ class PipelineStore:
 
     def save_component(self, pipeline_id: str, filename: str, content: bytes) -> Path:
         """保存组件文件到 pipeline 的 components 目录。"""
+        filename = self._validate_python_filename(filename)
         comp_dir = self._pipeline_dir(pipeline_id) / "components"
         comp_dir.mkdir(parents=True, exist_ok=True)
         path = comp_dir / filename
-        path.write_bytes(content)
+        self._write_bytes_atomic(path, content)
         return path
 
     def list_components(self, pipeline_id: str) -> list[str]:
@@ -124,6 +129,7 @@ class PipelineStore:
 
     def read_component(self, pipeline_id: str, filename: str) -> str | None:
         """读取组件文件内容，不存在返回 None。"""
+        filename = self._validate_python_filename(filename)
         path = self._pipeline_dir(pipeline_id) / "components" / filename
         if not path.exists():
             return None
@@ -131,7 +137,35 @@ class PipelineStore:
 
     def delete_component(self, pipeline_id: str, filename: str) -> bool:
         """删除指定组件文件。"""
+        filename = self._validate_python_filename(filename)
         path = self._pipeline_dir(pipeline_id) / "components" / filename
+        if not path.exists():
+            return False
+        path.unlink()
+        return True
+
+    # ── Hook 文件管理 ──────────────────────────────────────────
+
+    def save_hook(self, pipeline_id: str, filename: str, content: bytes) -> Path:
+        filename = self._validate_python_filename(filename)
+        hook_dir = self._pipeline_dir(pipeline_id) / "hooks"
+        hook_dir.mkdir(parents=True, exist_ok=True)
+        path = hook_dir / filename
+        self._write_bytes_atomic(path, content)
+        return path
+
+    def list_hook_paths(self, pipeline_id: str) -> list[Path]:
+        hook_dir = self._pipeline_dir(pipeline_id) / "hooks"
+        return sorted(hook_dir.glob("*.py")) if hook_dir.exists() else []
+
+    def read_hook(self, pipeline_id: str, filename: str) -> str | None:
+        filename = self._validate_python_filename(filename)
+        path = self._pipeline_dir(pipeline_id) / "hooks" / filename
+        return path.read_text(encoding="utf-8") if path.exists() else None
+
+    def delete_hook(self, pipeline_id: str, filename: str) -> bool:
+        filename = self._validate_python_filename(filename)
+        path = self._pipeline_dir(pipeline_id) / "hooks" / filename
         if not path.exists():
             return False
         path.unlink()
@@ -140,7 +174,7 @@ class PipelineStore:
     # ── 导出/导入 ──────────────────────────────────────────────
 
     def export_yaml(self, pipeline_id: str) -> str | None:
-        """导出 pipeline 为 YAML 文本（manifest + 组件源码）。
+        """导出 pipeline 为 YAML 文本（manifest + 组件与 hook 源码）。
 
         返回单个可读 YAML 字符串，包含 manifest 和所有组件文件内容。
         pipeline 不存在时返回 None。
@@ -153,6 +187,10 @@ class PipelineStore:
         components: dict[str, str] = {}
         for py_path in self.list_component_paths(pipeline_id):
             components[py_path.name] = py_path.read_text(encoding="utf-8")
+        hooks = {
+            py_path.name: py_path.read_text(encoding="utf-8")
+            for py_path in self.list_hook_paths(pipeline_id)
+        }
 
         export_data: dict[str, Any] = {
             "deepflow_export": _EXPORT_VERSION,
@@ -161,6 +199,8 @@ class PipelineStore:
         }
         if components:
             export_data["components"] = components
+        if hooks:
+            export_data["hooks"] = hooks
 
         return yaml.dump(export_data, allow_unicode=True, sort_keys=False, default_flow_style=False)
 
@@ -168,7 +208,7 @@ class PipelineStore:
         """从 YAML 文本创建 pipeline（分配新 ID）。
 
         期望格式：
-            deepflow_export: "1.0"
+            deepflow_export: "2.0"
             name: ...
             manifest: { ... }
             components:           # 可选
@@ -185,17 +225,29 @@ class PipelineStore:
 
         if not isinstance(data, dict) or "manifest" not in data:
             raise ValueError("缺少 manifest 字段")
+        if data.get("deepflow_export") != _EXPORT_VERSION:
+            raise ValueError(
+                f"不支持的 deepflow_export 版本: {data.get('deepflow_export')!r}; "
+                f"仅支持 {_EXPORT_VERSION}"
+            )
 
-        name = data.get("name") or data["manifest"].get("name", "imported-pipeline")
         manifest = data["manifest"]
+        if not isinstance(manifest, dict):
+            raise ValueError("manifest 必须是对象")
+        name = data.get("name") or manifest.get("name", "imported-pipeline")
+        if not isinstance(name, str):
+            raise ValueError("name 必须是字符串")
         components: dict[str, str] = data.get("components", {})
+        hooks: dict[str, str] = data.get("hooks", {})
+        if not isinstance(components, dict) or not isinstance(hooks, dict):
+            raise ValueError("components 与 hooks 必须是文件名到源码的对象")
+        for filename, source in (*components.items(), *hooks.items()):
+            self._validate_python_filename(filename)
+            if not isinstance(source, str):
+                raise ValueError(f"源码必须是字符串: {filename}")
 
         pipeline_id = uuid.uuid4().hex[:8]
         now = datetime.now(timezone.utc)
-
-        pipeline_dir = self._pipeline_dir(pipeline_id)
-        pipeline_dir.mkdir(parents=True, exist_ok=True)
-        (pipeline_dir / "components").mkdir(exist_ok=True)
 
         record = {
             "id": pipeline_id,
@@ -204,13 +256,27 @@ class PipelineStore:
             "created_at": now.isoformat(),
             "updated_at": now.isoformat(),
         }
-        self._write_json(pipeline_id, record)
+        response = PipelineResponse(**record)
+        pipeline_dir = self._pipeline_dir(pipeline_id)
+        staging_dir = self._dir / f".import-{pipeline_id}"
+        try:
+            (staging_dir / "components").mkdir(parents=True)
+            (staging_dir / "hooks").mkdir()
+            for filename, source in components.items():
+                (staging_dir / "components" / filename).write_text(source, encoding="utf-8")
+            for filename, source in hooks.items():
+                (staging_dir / "hooks" / filename).write_text(source, encoding="utf-8")
+            (staging_dir / "pipeline.json").write_text(
+                json.dumps(record, indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            staging_dir.replace(pipeline_dir)
+        except Exception:
+            if staging_dir.exists():
+                shutil.rmtree(staging_dir)
+            raise
 
-        for filename, source in components.items():
-            if filename.endswith(".py"):
-                (pipeline_dir / "components" / filename).write_text(source, encoding="utf-8")
-
-        return PipelineResponse(**record)
+        return response
 
     # ── 内部方法 ───────────────────────────────────────────────
 
@@ -220,10 +286,22 @@ class PipelineStore:
     def _json_path(self, pipeline_id: str) -> Path:
         return self._dir / pipeline_id / "pipeline.json"
 
+    @staticmethod
+    def _validate_python_filename(filename: str) -> str:
+        if not filename or Path(filename).name != filename or not filename.endswith(".py"):
+            raise ValueError(f"非法 Python 文件名: {filename!r}")
+        return filename
+
     def _write_json(self, pipeline_id: str, data: dict[str, Any]) -> None:
         """原子写入：先写临时文件，再 rename，避免写到一半崩溃。"""
         path = self._json_path(pipeline_id)
         temp = path.with_suffix(".tmp")
         with temp.open("w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
+        temp.replace(path)
+
+    @staticmethod
+    def _write_bytes_atomic(path: Path, content: bytes) -> None:
+        temp = path.with_suffix(path.suffix + ".tmp")
+        temp.write_bytes(content)
         temp.replace(path)

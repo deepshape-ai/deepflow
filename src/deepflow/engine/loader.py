@@ -1,17 +1,16 @@
 from __future__ import annotations
 
+import hashlib
 import importlib
 import importlib.util
 import sys
-import uuid
+import threading
 from pathlib import Path
+from types import ModuleType
 from typing import Any
 
 from deepflow.core.component import (
     BaseComponent,
-    CasewiseComponent,
-    PostprocessComponent,
-    PreprocessComponent,
 )
 from deepflow.models.manifest import RetryConfig
 
@@ -20,6 +19,7 @@ _STAGE_MAP: dict[str, str] = {
     "CasewiseComponent": "casewise",
     "PostprocessComponent": "postprocess",
 }
+_IMPORT_LOCK = threading.RLock()
 
 
 class ComponentLoader:
@@ -63,7 +63,7 @@ class ComponentLoader:
         """仅解析组件类，不实例化。用于 check 命令校验。"""
         if src.startswith(("./", "/")):
             file_path, class_name = cls._parse_external_src(src, manifest_dir or Path.cwd())
-            module = cls._load_module_from_file(file_path)
+            module = cls._load_module_from_file(file_path, manifest_dir)
             return getattr(module, class_name)
         elif ":" in src:
             namespace, name = src.split(":", 1)
@@ -82,7 +82,7 @@ class ComponentLoader:
         import deepflow.plugins as plugins_pkg
 
         result = []
-        for importer, namespace, is_pkg in pkgutil.iter_modules(plugins_pkg.__path__):
+        for _importer, namespace, is_pkg in pkgutil.iter_modules(plugins_pkg.__path__):
             if not is_pkg:
                 continue
             ns_module = importlib.import_module(f"deepflow.plugins.{namespace}")
@@ -159,17 +159,60 @@ class ComponentLoader:
         if not file_path.exists():
             raise FileNotFoundError(f"组件文件未找到: {file_path}")
 
-        module = cls._load_module_from_file(file_path)
+        module = cls._load_module_from_file(file_path, manifest_dir)
         return getattr(module, class_name)(config=config)
 
-    @staticmethod
-    def _load_module_from_file(file_path: Path):
-        module_name = f"_deepflow_comp_{uuid.uuid4().hex[:8]}"
-        spec = importlib.util.spec_from_file_location(module_name, file_path)
-        if spec is None or spec.loader is None:
-            raise ImportError(f"无法加载模块: {file_path}")
+    @classmethod
+    def _load_module_from_file(
+        cls, file_path: Path, import_root: Path | None = None
+    ) -> ModuleType:
+        """Load local source in a manifest-unique namespace package.
 
-        module = importlib.util.module_from_spec(spec)
-        sys.modules[module_name] = module
-        spec.loader.exec_module(module)
+        Local source-to-source imports must be relative, for example
+        ``from .helper import VALUE``. This prevents concurrent server runs from
+        sharing bare module names through process-global ``sys.modules``.
+        """
+        absolute_file = file_path.absolute()
+        root = (import_root or file_path.parent).absolute()
+        try:
+            relative = absolute_file.relative_to(root).with_suffix("")
+        except ValueError as error:
+            raise ValueError(f"本地源码必须位于 manifest 目录内: {file_path}") from error
+
+        digest = hashlib.sha256(str(root).encode()).hexdigest()[:16]
+        package_name = f"_deepflow_manifest_{digest}"
+        module_name = ".".join((package_name, *relative.parts))
+
+        with _IMPORT_LOCK:
+            cached = sys.modules.get(module_name)
+            if cached is not None:
+                return cached
+
+            cls._ensure_namespace_package(package_name, root)
+            current_name = package_name
+            current_path = root
+            for part in relative.parts[:-1]:
+                current_name = f"{current_name}.{part}"
+                current_path /= part
+                cls._ensure_namespace_package(current_name, current_path)
+
+            spec = importlib.util.spec_from_file_location(module_name, absolute_file)
+            if spec is None or spec.loader is None:
+                raise ImportError(f"无法加载模块: {file_path}")
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[module_name] = module
+            try:
+                spec.loader.exec_module(module)
+            except Exception:
+                sys.modules.pop(module_name, None)
+                raise
         return module
+
+    @staticmethod
+    def _ensure_namespace_package(name: str, path: Path) -> None:
+        if name in sys.modules:
+            return
+        package = ModuleType(name)
+        package.__package__ = name
+        package.__path__ = [str(path)]  # type: ignore[attr-defined]
+        sys.modules[name] = package

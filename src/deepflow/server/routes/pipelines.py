@@ -58,7 +58,7 @@ async def create_pipeline(
     try:
         Manifest.model_validate(body.manifest)
     except ValidationError as e:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail=e.errors())
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail=e.errors()) from e
     return store.create(body.name, body.manifest)
 
 
@@ -90,7 +90,7 @@ async def update_pipeline(
         try:
             Manifest.model_validate(body.manifest)
         except ValidationError as e:
-            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail=e.errors())
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail=e.errors()) from e
     pipeline = store.update(pipeline_id, body.name, body.manifest)
     if pipeline is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"Pipeline {pipeline_id} not found")
@@ -149,7 +149,10 @@ async def upload_component(
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Only .py files are allowed")
 
     content = await file.read()
-    store.save_component(pipeline_id, filename, content)
+    try:
+        store.save_component(pipeline_id, filename, content)
+    except ValueError as error:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(error)) from error
     return {"filename": filename, "path": f"./components/{filename}"}
 
 
@@ -187,7 +190,10 @@ async def get_component(
     """读取组件文件内容。"""
     if store.get(pipeline_id) is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"Pipeline {pipeline_id} not found")
-    content = store.read_component(pipeline_id, filename)
+    try:
+        content = store.read_component(pipeline_id, filename)
+    except ValueError as error:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(error)) from error
     if content is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"Component {filename} not found")
     return ComponentContentResponse(filename=filename, content=content)
@@ -205,7 +211,10 @@ async def update_component(
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"Pipeline {pipeline_id} not found")
     if not filename.endswith(".py"):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Only .py files are allowed")
-    path = store.save_component(pipeline_id, filename, body.content.encode("utf-8"))
+    try:
+        path = store.save_component(pipeline_id, filename, body.content.encode("utf-8"))
+    except ValueError as error:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(error)) from error
     meta = extract_from_file(path)
     if meta:
         return CustomComponentInfo(
@@ -227,5 +236,91 @@ async def delete_component(
     """删除指定组件文件。"""
     if store.get(pipeline_id) is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"Pipeline {pipeline_id} not found")
-    if not store.delete_component(pipeline_id, filename):
+    try:
+        deleted = store.delete_component(pipeline_id, filename)
+    except ValueError as error:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(error)) from error
+    if not deleted:
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"Component {filename} not found")
+
+
+# ── Hook 文件管理 ─────────────────────────────────────────────
+
+
+@router.post("/{pipeline_id}/hooks", status_code=status.HTTP_201_CREATED)
+async def upload_hook(
+    pipeline_id: str,
+    file: UploadFile,
+    store: PipelineStore = Depends(get_pipeline_store),
+) -> dict[str, str]:
+    if store.get(pipeline_id) is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"Pipeline {pipeline_id} not found")
+    filename = file.filename or "hook.py"
+    try:
+        store.save_hook(pipeline_id, filename, await file.read())
+    except ValueError as error:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(error)) from error
+    return {"filename": filename, "path": f"./hooks/{filename}"}
+
+
+@router.get("/{pipeline_id}/hooks", response_model=list[str])
+async def list_hooks(
+    pipeline_id: str,
+    store: PipelineStore = Depends(get_pipeline_store),
+) -> list[str]:
+    if store.get(pipeline_id) is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"Pipeline {pipeline_id} not found")
+    return [path.name for path in store.list_hook_paths(pipeline_id)]
+
+
+@router.get("/{pipeline_id}/hooks/{filename}", response_model=ComponentContentResponse)
+async def get_hook(
+    pipeline_id: str,
+    filename: str,
+    store: PipelineStore = Depends(get_pipeline_store),
+) -> ComponentContentResponse:
+    if store.get(pipeline_id) is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"Pipeline {pipeline_id} not found")
+    try:
+        content = store.read_hook(pipeline_id, filename)
+    except ValueError as error:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(error)) from error
+    if content is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"Hook {filename} not found")
+    return ComponentContentResponse(filename=filename, content=content)
+
+
+@router.put("/{pipeline_id}/hooks/{filename}")
+async def update_hook(
+    pipeline_id: str,
+    filename: str,
+    body: ComponentUpdateRequest,
+    store: PipelineStore = Depends(get_pipeline_store),
+) -> dict[str, str]:
+    if store.get(pipeline_id) is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"Pipeline {pipeline_id} not found")
+    try:
+        store.save_hook(pipeline_id, filename, body.content.encode("utf-8"))
+    except ValueError as error:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(error)) from error
+    return {"filename": filename, "path": f"./hooks/{filename}"}
+
+
+@router.delete(
+    "/{pipeline_id}/hooks/{filename}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    response_model=None,
+)
+async def delete_hook(
+    pipeline_id: str,
+    filename: str,
+    store: PipelineStore = Depends(get_pipeline_store),
+):
+    if store.get(pipeline_id) is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"Pipeline {pipeline_id} not found")
+    try:
+        deleted = store.delete_hook(pipeline_id, filename)
+    except ValueError as error:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(error)) from error
+    if not deleted:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"Hook {filename} not found")

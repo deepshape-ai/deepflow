@@ -17,6 +17,8 @@ pipeline:
   preprocess: [...]       # list[StepConfig]
   casewise:   [...]
   postprocess:[...]
+
+hooks: [...]              # 可选:list[HookConfig],生命周期观察 hook
 ```
 
 ## StepConfig
@@ -32,6 +34,19 @@ pipeline:
 ```
 
 `backoff: exponential` 时，第 N 次重试间隔 = `delay * 2^(N-1)`（N 从 1 起）。
+
+## HookConfig
+
+`hooks` 声明生命周期观察 hook,在 run/stage/step/case 各挂点插入自定义逻辑(通知、上报、自定义指标)。完整开发指南见 [HOOKS.md](../../../docs/HOOKS.md):
+
+```yaml
+hooks:
+  - src: ./hooks/notify.py        # hook 引用,格式同组件引用
+    config:                        # 可选,传给 hook 的 dict
+      webhook: ${FEISHU_BOT_URL}
+```
+
+`src` 的解析规则与组件引用完全相同(`builtin:` / `namespace:name` / `./path.py` / 显式类名),只是加载的类需继承 `deepflow.Hook`。hook 纯观察、fail-open,无 `retry` 字段。
 
 ## 组件引用格式
 
@@ -94,8 +109,8 @@ shared:
 
 工作机制：
 
-1. 框架在加载组件之前，把 shared 目录加入 `sys.path`。
-2. shared 目录下的 `.py` 文件作为**顶层模块**被 import，文件名即模块名。
+本地源码使用 manifest 专属命名空间。组件之间必须写包内相对导入，避免并发 run
+通过 Python 全局模块缓存串用代码。
 
 例子：
 
@@ -104,12 +119,12 @@ my-pipeline/
   manifest.yaml
   components/
     _shared/
-      llm_client.py    # → import llm_client
-      stages.py        # → from stages import SEMANTIC_STAGES
-    quality_check.py   # 内部可以 from llm_client import call
+      llm_client.py
+      stages.py
+    quality_check.py   # 内部: from ._shared.llm_client import call
 ```
 
-**坑点**：shared 模块名和标准库 / 第三方包重名会被遮蔽。常见雷区：`json.py`、`utils.py`、`config.py`、`logging.py`、`requests.py`。命名要带项目前缀（`my_llm_client.py`）或放更深一层避免冲突。
+本地源码必须位于 manifest 目录内。不要使用 `import helper` 这类裸导入。
 
 ## 完整示例
 
@@ -153,6 +168,9 @@ pipeline:
     - src: ./components/feishu_notify.py
       config:
         only_on_failure: true
+
+hooks:
+  - src: ./hooks/run_report.py        # 生命周期观察 hook(可选),见 HOOKS.md
 ```
 
 ## 校验 / 预演
@@ -162,4 +180,4 @@ deepflow check -c manifest.yaml      # 校验 schema、组件能加载、阶段�
 deepflow run --dry-run -c manifest.yaml  # 真实跑 preprocess 看 case 数 + 执行计划，不进 casewise
 ```
 
-`check` 不真实跑 preprocess（不会触发副作用，例如外部 API 拉数据），所以快但不能验数据集本身。`--dry-run` 跑 preprocess + 列计划，对真实环境最有信心。
+`check` 会校验组件、hook 类与 hook 的 Pydantic `Config`，但不真实跑 preprocess（不会触发副作用，例如外部 API 拉数据），所以快但不能验数据集本身。`--dry-run` 跑 preprocess + 列计划，对真实环境最有信心。

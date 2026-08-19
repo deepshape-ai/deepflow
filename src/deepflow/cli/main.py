@@ -8,6 +8,7 @@ from pathlib import Path
 import click
 import yaml
 
+from deepflow.cli.hooks import CliRendererHook
 from deepflow.core.case_log import ContextInjectFilter, attach_run_log, detach_run_log
 from deepflow.engine.orchestrator import Orchestrator
 from deepflow.models.manifest import Manifest, extract_env_refs
@@ -76,7 +77,7 @@ def run(config: Path, verbose: bool, dry_run: bool) -> None:
             from deepflow.cli.renderer import PipelineRenderer
 
             renderer = PipelineRenderer(manifest.name)
-            orchestrator.set_renderer(renderer)
+            orchestrator.add_hook(CliRendererHook(renderer), builtin=True)
             renderer.start()
             try:
                 orchestrator.run()
@@ -90,6 +91,7 @@ def run(config: Path, verbose: bool, dry_run: bool) -> None:
 def _render_dry_run(orchestrator: Orchestrator, config: Path) -> None:
     """执行 preprocess 并用 Rich 渲染执行计划。"""
     from rich.console import Console
+
     from deepflow.models.manifest import extract_env_refs
 
     console = Console()
@@ -161,6 +163,12 @@ pipeline:
     #     backoff: exponential
 
   postprocess: []
+
+# 生命周期观察 hook(可选):在 run/stage/step/case 各层级插入自定义逻辑
+# hooks:
+#   - src: ./hooks/my_hook.py
+#     config:
+#       some_option: "value"
 '''
     output.write_text(template)
     click.echo(f"Generated manifest at {output}")
@@ -175,6 +183,7 @@ def check(config: Path) -> None:
         PostprocessComponent,
         PreprocessComponent,
     )
+    from deepflow.engine.hook_loader import HookLoader
     from deepflow.engine.loader import ComponentLoader
 
     errors: list[str] = []
@@ -232,13 +241,24 @@ def check(config: Path) -> None:
                 errors.append(f"{step.src}: {e}")
                 click.echo(f"  \u2717 {step.src} — {e}")
 
-    # 3. 汇总
+    # 3. 校验 hook 类与声明配置
+    for hook in manifest.hooks:
+        try:
+            hook_class = HookLoader.resolve_class(hook.src, manifest_dir)
+            if hook_class.Config is not None:
+                hook_class.Config.model_validate(hook.config)
+            click.echo(f"  \u2713 {hook.src} — hook")
+        except Exception as e:
+            errors.append(f"{hook.src}: {e}")
+            click.echo(f"  \u2717 {hook.src} — {e}")
+
+    # 4. 汇总
     click.echo()
     if errors:
         click.echo(f"  结果: {len(errors)} error(s), {len(warnings)} warning(s)")
         raise SystemExit(1)
     else:
-        click.echo(f"  结果: 全部通过")
+        click.echo("  结果: 全部通过")
 
 
 @cli.command()

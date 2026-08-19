@@ -72,9 +72,6 @@ concurrency: 4              # 1-100，IO 密集可拉到 16-32
 vars:                       # 组件通过 ctx.vars 访问（只读）
   threshold: 0.85
 
-shared:
-  - ./components/_shared    # 加进 sys.path，组件里可 `from llm_client import ...`
-
 pipeline:
   preprocess:
     - src: builtin:clean_workspace      # 内置组件，每次从干净状态开始

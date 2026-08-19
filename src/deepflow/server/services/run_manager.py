@@ -33,6 +33,7 @@ from typing import Any
 from deepflow.engine.orchestrator import CancellationError, Orchestrator, case_ctx, run_ctx
 from deepflow.models.manifest import Manifest
 from deepflow.server.events import AsyncEventBridge
+from deepflow.server.hooks import EventEmitterHook
 from deepflow.server.models import ProgressInfo, RunResponse, RunStatus
 
 logger = logging.getLogger(__name__)
@@ -182,7 +183,12 @@ class RunManager:
 
         # manifest_dir 决定组件路径解析根目录
         # Pipeline 运行 → pipeline 目录；直接运行 → run 自身目录（仅内置组件可用）
-        effective_dir = manifest_dir or (self._runs_dir / run_id)
+        if manifest_dir is not None:
+            source_snapshot = self._runs_dir / run_id / "source"
+            shutil.copytree(manifest_dir, source_snapshot)
+            effective_dir = source_snapshot
+        else:
+            effective_dir = self._runs_dir / run_id
         state = RunState(run_id, manifest, effective_dir, pipeline_id=pipeline_id)
 
         # 创建事件桥接
@@ -280,34 +286,54 @@ class RunManager:
         """在后台线程中执行 Pipeline。这是同步世界的入口。"""
         state.status = RunStatus.RUNNING
         state.started_at = datetime.now(timezone.utc)
-
-        # 每次运行独立日志文件
-        run_dir = self._runs_dir / state.run_id
-        run_dir.mkdir(parents=True, exist_ok=True)
-        log_handler = self._attach_run_log(run_dir / "run.log", state.run_id)
-
-        orchestrator = Orchestrator(
-            manifest=state.manifest,
-            manifest_dir=state.manifest_dir,
+        run_token = run_ctx.set(state.run_id)
+        case_token = case_ctx.set("")
+        log_handler: logging.FileHandler | None = None
+        final_status = RunStatus.FAILED
+        final_error: str | None = None
+        assert state.event_bridge is not None
+        event_hook = EventEmitterHook(
+            state.event_bridge,
             run_id=state.run_id,
-            event_emitter=state.event_bridge,
-            cancel_event=state.cancel_event,
+            pipeline_name=state.manifest.name,
         )
-        state.orchestrator = orchestrator
-
         try:
+            run_dir = self._runs_dir / state.run_id
+            run_dir.mkdir(parents=True, exist_ok=True)
+            log_handler = self._attach_run_log(run_dir / "run.log", state.run_id)
+            orchestrator = Orchestrator(
+                manifest=state.manifest,
+                manifest_dir=state.manifest_dir,
+                run_id=state.run_id,
+                cancel_event=state.cancel_event,
+                builtin_hooks=[event_hook],
+            )
+            state.orchestrator = orchestrator
             orchestrator.run()
-            state.status = RunStatus.COMPLETED
+            final_status = RunStatus.COMPLETED
         except CancellationError:
-            state.status = RunStatus.CANCELLED
+            final_status = RunStatus.CANCELLED
         except Exception as e:
-            state.status = RunStatus.FAILED
-            state.error = str(e)
+            final_status = RunStatus.FAILED
+            final_error = str(e)
+            if state.orchestrator is None:
+                event_hook.emit_construction_failure()
             logger.exception("Run %s failed", state.run_id)
         finally:
             state.completed_at = datetime.now(timezone.utc)
-            self._persist_run(state)
-            self._detach_run_log(log_handler)
+            if log_handler is not None:
+                try:
+                    self._detach_run_log(log_handler)
+                except Exception:
+                    logger.exception("Run %s log cleanup failed", state.run_id)
+            state.error = final_error
+            state.status = final_status
+            try:
+                self._persist_run(state)
+            except Exception:
+                logger.exception("Run %s final state persistence failed", state.run_id)
+            case_ctx.reset(case_token)
+            run_ctx.reset(run_token)
 
     @staticmethod
     def _attach_run_log(log_path: Path, run_id: str) -> logging.FileHandler:

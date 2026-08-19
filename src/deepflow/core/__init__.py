@@ -2,15 +2,16 @@
 
 from deepflow.core.component import (
     BaseComponent,
-    PreprocessComponent,
     CasewiseComponent,
-    PostprocessComponent,
-    PreprocessOutput,
     CasewiseOutput,
-    PostprocessOutput
+    PostprocessComponent,
+    PostprocessOutput,
+    PreprocessComponent,
+    PreprocessOutput,
 )
 from deepflow.core.context import CaseContext, PipelineContext
 from deepflow.core.errors import FatalError
+from deepflow.core.hook import Hook, HookContext, HookDispatcher
 from deepflow.core.iterator import BaseIterator, MemoryIterator
 from deepflow.core.store import ContextStore
 
@@ -34,4 +35,8 @@ __all__ = [
     "MemoryIterator",
     # Store
     "ContextStore",
+    # Hook 总线
+    "Hook",
+    "HookContext",
+    "HookDispatcher",
 ]

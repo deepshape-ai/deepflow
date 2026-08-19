@@ -37,6 +37,7 @@ def make_manifest(tmp_path: Path):
         casewise: list[str | dict[str, Any]] | None = None,
         postprocess: list[str] | None = None,
         concurrency: int = 2,
+        hooks: list[dict[str, Any]] | None = None,
     ) -> Manifest:
         def step(entry: str | dict[str, Any]) -> dict[str, Any]:
             return entry if isinstance(entry, dict) else {"src": entry}
@@ -52,6 +53,8 @@ def make_manifest(tmp_path: Path):
                 "postprocess": [step(s) for s in (postprocess or [])],
             },
         }
+        if hooks:
+            data["hooks"] = hooks
         return Manifest.model_validate(data)
 
     return _make
